@@ -2,6 +2,8 @@
 var express = require('express');
 var passport = require('passport');
 var InstagramStrategy = require('passport-instagram').Strategy;
+var SoundCloudStrategy = require('passport-soundcloud').Strategy;
+var FacebookStrategy = require('passport-facebook').Strategy;
 var http = require('http');
 var path = require('path');
 var handlebars = require('express-handlebars');
@@ -11,17 +13,27 @@ var cookieParser = require('cookie-parser');
 var dotenv = require('dotenv');
 var mongoose = require('mongoose');
 var Instagram = require('instagram-node-lib');
+var SoundCloud = require('soundcloud-node');
+var Facebook = require('fbgraph');
 var async = require('async');
 var app = express();
 
+var superuser;
+
 //local dependencies
 var models = require('./models');
+
 
 //client id and client secret here, taken from .env
 dotenv.load();
 var INSTAGRAM_CLIENT_ID = process.env.INSTAGRAM_CLIENT_ID;
 var INSTAGRAM_CLIENT_SECRET = process.env.INSTAGRAM_CLIENT_SECRET;
 var INSTAGRAM_CALLBACK_URL = process.env.INSTAGRAM_CALLBACK_URL;
+
+var FACEBOOK_APP_ID = process.env.FACEBOOK_APP_ID;
+var FACEBOOK_APP_SECRET = process.env.FACEBOOK_APP_SECRET;
+var FACEBOOK_REDIRECT_URL = process.env.FACEBOOK_REDIRECT_URL;
+
 Instagram.set('client_id', INSTAGRAM_CLIENT_ID);
 Instagram.set('client_secret', INSTAGRAM_CLIENT_SECRET);
 
@@ -48,6 +60,78 @@ passport.deserializeUser(function(obj, done) {
   done(null, obj);
 });
 
+//Instantiate the client
+//var client = new SoundCloud(SOUNDCLOUD_CLIENT_ID, SOUNDCLOUD_CLIENT_SECRET, SOUNDCLOUD_CALLBACK_URL);
+
+//Connect User
+var oauthInit = function(req, res) {
+  var url = client.getConnectUrl();
+  res.writeHead(301, url);
+  res.end();
+};
+
+//Get OAuth Token
+//callback funtion from the connect url
+var oauthHandleToken = function(req, res) {
+  var query = req.query;
+
+  client.getToken(query.code, function(err, tokens) {
+    if (err)
+      callback(err);
+    else {
+      callback(null, tokens);
+    }
+  });
+};
+
+passport.use(new FacebookStrategy({
+  clientID: FACEBOOK_APP_ID,
+  clientSecret: FACEBOOK_APP_SECRET,
+  callbackURL: FACEBOOK_REDIRECT_URL
+},
+  function(accessToken, refreshToken, profile, done) {
+    // asynchronous verification, for effect...
+   models.User.findOne({
+    "sc_id": profile.id
+   }, function(err, user) {
+      if (err) {
+        return done(err); 
+      }
+      
+      //didnt find a user
+      if (!user) {
+        newUser = new models.User({
+          name: profile.username, 
+          sc_id: profile.id,
+          sc_access_token: accessToken
+        });
+
+        newUser.save(function(err) {
+          if(err) {
+            console.log(err);
+          } else {
+            console.log('user: ' + newUser.name + " created.");
+          }
+          return done(null, newUser);
+        });
+      } else {
+        //update user here
+        Facebook.setAccessToken(accessToken);
+        user.sc_access_token = accessToken;
+        user.save();
+        superuser = user;
+
+        process.nextTick(function () {
+          // To keep the example simple, the user's Instagram profile is returned to
+          // represent the logged-in user.  In a typical application, you would want
+          // to associate the Instagram account with a user record in your database,
+          // and return that user instead.
+          return done(null, user);
+        });
+      }
+   });
+  }
+));
 
 // Use the InstagramStrategy within Passport.
 //   Strategies in Passport require a `verify` function, which accept
@@ -137,6 +221,13 @@ function ensureAuthenticatedInstagram(req, res, next) {
   res.redirect('/login');
 }
 
+function ensureAuthenticatedSoundCloud(req, res, next) {
+  if (req.isAuthenicated() && !!req.user.sc_id) {
+    return next();
+  }
+  res.redirect('/login');
+}
+
 
 //routes
 app.get('/', function(req, res){
@@ -149,6 +240,38 @@ app.get('/login', function(req, res){
 
 app.get('/account', ensureAuthenticated, function(req, res){
   res.render('account', {user: req.user});
+});
+
+
+    var imageArr = [];
+
+app.get('/fb_d3', ensureAuthenticated, function(req, res){
+
+  if(req.user){
+    var array = [];
+    var temp_item;
+    Facebook.setAccessToken(req.user.sc_access_token);
+    Facebook.get("/me/photos" , function(err, res) {
+      for (var i = 0; i < res.data.length; i++)
+      {
+        var someitem = res.data[i];
+        var smallerItem;
+        if(someitem.likes)
+        {
+          smallerItem = someitem.likes.data;
+        }
+        else
+        {
+          array.push(0);
+        }
+        console.log(smallerItem.length);
+        array.push(smallerItem.length);
+      }
+      imageArr = array;
+     });
+
+  }
+  return res.json({users: imageArr});   
 });
 
 app.get('/igphotos', ensureAuthenticatedInstagram, function(req, res){
@@ -170,11 +293,14 @@ app.get('/igphotos', ensureAuthenticatedInstagram, function(req, res){
             return tempJSON;
           });
           res.render('photos', {photos: imageArr});
+
         }
       }); 
     }
   });
 });
+
+
 
 app.get('/igMediaCounts', ensureAuthenticatedInstagram, function(req, res){
   var query  = models.User.where({ ig_id: req.user.ig_id });
@@ -201,8 +327,7 @@ app.get('/igMediaCounts', ensureAuthenticatedInstagram, function(req, res){
                   }
                 });            
             });
-          });
-          
+          });   
           // Now we have an array of functions, each containing an async task
           // Execute all async tasks in the asyncTasks array
           async.parallel(asyncTasks, function(err){
@@ -225,12 +350,26 @@ app.get('/c3visualization', ensureAuthenticatedInstagram, function (req, res){
   res.render('c3visualization');
 }); 
 
+app.get('/fb_c3_vis', function (req, res){
+  res.render('fb_c3_vis');
+}); 
+
+app.get('/auth/facebook',
+  passport.authenticate('facebook'));
+
 app.get('/auth/instagram',
   passport.authenticate('instagram'),
   function(req, res){
     // The request will be redirected to Instagram for authentication, so this
     // function will not be called.
   });
+
+app.get('/auth/facebook/callback',
+  passport.authenticate('facebook', { failureRedirect: '/login'}),
+  function(req, res) {
+
+    res.redirect('/fb_c3_vis');
+});
 
 app.get('/auth/instagram/callback', 
   passport.authenticate('instagram', { failureRedirect: '/login'}),
